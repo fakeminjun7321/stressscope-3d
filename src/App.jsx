@@ -23,6 +23,7 @@ import {
   Info,
   Layers3,
   Network,
+  Printer,
   Ruler,
   RotateCcw,
   Send,
@@ -53,6 +54,8 @@ import {
   formatPercent,
   geometryFromObject,
   prepareGeometry,
+  printRiskLabel,
+  printRiskTone,
   utilizationLabel,
   utilizationTone,
 } from "./modelAnalysis.js";
@@ -78,13 +81,20 @@ const DEFAULT_SETTINGS = {
   infill: 35,
   shells: 2,
   targetSafety: 2,
-  layerAxis: "z",
+  layerAxis: "y",
+  overhangAngle: 45,
+  viewMode: "stress",
 };
 
 const LAYER_AXES = {
-  z: { label: "Z축 적층" },
   y: { label: "Y축 적층" },
+  z: { label: "Z축 적층" },
   x: { label: "X축 적층" },
+};
+
+const VIEW_MODES = {
+  stress: { label: "하중", icon: Activity },
+  print: { label: "출력", icon: Printer },
 };
 
 function App() {
@@ -113,8 +123,16 @@ function App() {
     () => createSolverJobPayload(model, analysis, settings, proSettings, professional),
     [model, analysis, settings, proSettings, professional],
   );
-  const tone = utilizationTone(analysis.maxUtilization);
-  const recommendations = useMemo(() => buildRecommendations(analysis, settings), [analysis, settings]);
+  const isPrintMode = settings.viewMode === "print";
+  const activeScore = isPrintMode ? analysis.printStability.maxRisk : analysis.maxUtilization;
+  const tone = isPrintMode ? printRiskTone(activeScore) : utilizationTone(activeScore);
+  const statusText = isPrintMode
+    ? `${printRiskLabel(activeScore)} · 출력 리스크 ${formatPercent(activeScore)}`
+    : `${utilizationLabel(activeScore)} · 최대 사용률 ${formatPercent(activeScore)}`;
+  const recommendations = useMemo(
+    () => (settings.viewMode === "print" ? buildPrintRecommendations(analysis, settings) : buildRecommendations(analysis, settings)),
+    [analysis, settings],
+  );
 
   function updateSetting(key, value) {
     setSettings((current) => ({ ...current, [key]: value }));
@@ -232,7 +250,9 @@ function App() {
         deflectionMm: analysis.deflectionMm,
         massGrams: analysis.massGrams,
         warningRatio: analysis.warningRatio,
+        printStatus: printRiskLabel(analysis.printStability.maxRisk),
       },
+      printStability: summarizePrintStability(analysis.printStability),
       hotspots: analysis.hotspots.map((hotspot) => ({
         utilization: hotspot.utilization,
         stressMPa: hotspot.stressMPa,
@@ -261,8 +281,8 @@ function App() {
           </div>
         </div>
         <div className={`status-chip ${tone}`}>
-          <ShieldCheck size={17} />
-          {utilizationLabel(analysis.maxUtilization)} · 최대 사용률 {formatPercent(analysis.maxUtilization)}
+          {isPrintMode ? <Printer size={17} /> : <ShieldCheck size={17} />}
+          {statusText}
         </div>
       </header>
 
@@ -361,6 +381,7 @@ function App() {
 
           <div className="panel-block">
             <PanelHeading icon={Settings2} title="출력 조건" />
+            <ViewModeToggle value={settings.viewMode} onChange={(value) => updateSetting("viewMode", value)} />
             <div className="field-grid">
               <SelectField
                 label="단위"
@@ -393,6 +414,15 @@ function App() {
                 onChange={(value) => updateSetting("shells", value)}
               />
             </div>
+            <ControlSlider
+              label="서포트 기준 각도"
+              value={settings.overhangAngle}
+              min={35}
+              max={65}
+              step={1}
+              unit="도"
+              onChange={(value) => updateSetting("overhangAngle", value)}
+            />
             <ControlSlider
               label="인필"
               value={settings.infill}
@@ -512,7 +542,7 @@ function App() {
         <section className="simulation-panel">
           <div className="canvas-toolbar">
             <div>
-              <PanelHeading icon={Activity} title={model.name} />
+              <PanelHeading icon={isPrintMode ? Printer : Activity} title={model.name} />
               <span className="toolbar-subtext">
                 {formatNumber(analysis.size.x, 1)} × {formatNumber(analysis.size.y, 1)} × {formatNumber(analysis.size.z, 1)} {settings.units}
                 {" · "}
@@ -520,39 +550,55 @@ function App() {
               </span>
             </div>
             <div className="legend">
-              <span><i className="safe" /> 안정</span>
-              <span><i className="warn" /> 주의</span>
-              <span><i className="danger" /> 위험</span>
+              {isPrintMode ? (
+                <>
+                  <span><i className="safe" /> 출력 안정</span>
+                  <span><i className="warn" /> 서포트 후보</span>
+                  <span><i className="danger" /> 불안정</span>
+                </>
+              ) : (
+                <>
+                  <span><i className="safe" /> 안정</span>
+                  <span><i className="warn" /> 주의</span>
+                  <span><i className="danger" /> 위험</span>
+                </>
+              )}
             </div>
           </div>
           <ThreeStressViewer analysis={analysis} />
-          <StressSummary analysis={analysis} />
+          <StressSummary analysis={analysis} mode={settings.viewMode} />
         </section>
 
         <aside className="results-panel">
-          <PanelHeading icon={Gauge} title="해석 결과" />
-          <MetricRing value={analysis.maxUtilization} />
-          <div className="metric-grid">
-            <Metric label="최대 응력" value={`${formatNumber(analysis.maxStressMPa, 1)} MPa`} tone={tone} />
-            <Metric label="허용 응력" value={`${formatNumber(analysis.allowableMPa, 1)} MPa`} />
-            <Metric label="안전계수" value={`${formatNumber(analysis.safetyFactor, 2)} x`} tone={tone} />
-            <Metric label="추정 변위" value={`${formatNumber(analysis.deflectionMm, 2)} mm`} />
-            <Metric label="예상 무게" value={`${formatNumber(analysis.massGrams, 0)} g`} />
-            <Metric label="주의 면적" value={formatPercent(analysis.warningRatio)} tone={analysis.warningRatio > 0.16 ? "warn" : ""} />
-          </div>
-
-          <div className="hotspot-list">
-            <h2>응력 집중 지점</h2>
-            {analysis.hotspots.map((hotspot, index) => (
-              <div className="hotspot-row" key={`${hotspot.reason}-${index}`}>
-                <span className={`hotspot-dot ${index === 0 ? "critical" : ""}`}>{index + 1}</span>
-                <div>
-                  <strong>{hotspot.reason}</strong>
-                  <small>{formatNumber(hotspot.stressMPa, 1)} MPa · 사용률 {formatPercent(hotspot.utilization)}</small>
-                </div>
+          <PanelHeading icon={isPrintMode ? Printer : Gauge} title={isPrintMode ? "출력 안정성" : "해석 결과"} />
+          <MetricRing value={activeScore} label={isPrintMode ? "출력 리스크" : "최대 사용률"} tone={tone} />
+          {isPrintMode ? (
+            <PrintMetrics analysis={analysis} settings={settings} />
+          ) : (
+            <>
+              <div className="metric-grid">
+                <Metric label="최대 응력" value={`${formatNumber(analysis.maxStressMPa, 1)} MPa`} tone={tone} />
+                <Metric label="허용 응력" value={`${formatNumber(analysis.allowableMPa, 1)} MPa`} />
+                <Metric label="안전계수" value={`${formatNumber(analysis.safetyFactor, 2)} x`} tone={tone} />
+                <Metric label="추정 변위" value={`${formatNumber(analysis.deflectionMm, 2)} mm`} />
+                <Metric label="예상 무게" value={`${formatNumber(analysis.massGrams, 0)} g`} />
+                <Metric label="주의 면적" value={formatPercent(analysis.warningRatio)} tone={analysis.warningRatio > 0.16 ? "warn" : ""} />
               </div>
-            ))}
-          </div>
+
+              <div className="hotspot-list">
+                <h2>응력 집중 지점</h2>
+                {analysis.hotspots.map((hotspot, index) => (
+                  <div className="hotspot-row" key={`${hotspot.reason}-${index}`}>
+                    <span className={`hotspot-dot ${index === 0 ? "critical" : ""}`}>{index + 1}</span>
+                    <div>
+                      <strong>{hotspot.reason}</strong>
+                      <small>{formatNumber(hotspot.stressMPa, 1)} MPa · 사용률 {formatPercent(hotspot.utilization)}</small>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
 
           <div className="recommend-list">
             <h2>개선 방향</h2>
@@ -568,7 +614,9 @@ function App() {
           </div>
 
           <div className="note">
-            빠른 메시 기반 근사 해석입니다. 실제 제품 판정은 Fusion Simulation, Abaqus, Ansys 같은 FEA와 출력물 파괴 시험으로 검증하세요.
+            {isPrintMode
+              ? "출력 안정성 표시는 오버행, 브릿지, 베드 접촉, 높고 얇은 형상을 보는 슬라이서 전 예비 판정입니다. 실제 서포트는 사용하는 슬라이서에서 한 번 더 확인하세요."
+              : "빠른 메시 기반 근사 해석입니다. 실제 제품 판정은 Fusion Simulation, Abaqus, Ansys 같은 FEA와 출력물 파괴 시험으로 검증하세요."}
           </div>
         </aside>
       </section>
@@ -700,11 +748,41 @@ function ToggleField({ label, checked, onChange }) {
   );
 }
 
-function StressSummary({ analysis }) {
-  const stressBars = [
-    { label: "최대", value: analysis.maxStressMPa / Math.max(analysis.allowableMPa, 0.001), icon: Zap },
-    { label: "평균", value: analysis.avgStressMPa / Math.max(analysis.allowableMPa, 0.001), icon: Activity },
-    { label: "주의 면적", value: analysis.warningRatio, icon: Target },
+function ViewModeToggle({ value, onChange }) {
+  return (
+    <div className="mode-toggle" role="group" aria-label="표시 모드">
+      {Object.entries(VIEW_MODES).map(([key, mode]) => {
+        const Icon = mode.icon;
+        return (
+          <button
+            type="button"
+            className={value === key ? "active" : ""}
+            onClick={() => onChange(key)}
+            key={key}
+            aria-pressed={value === key}
+          >
+            <Icon size={15} />
+            {mode.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function StressSummary({ analysis, mode }) {
+  const isPrintMode = mode === "print";
+  const print = analysis.printStability;
+  const stressBars = isPrintMode
+    ? [
+        { label: "최대 리스크", value: print.maxRisk, icon: AlertTriangle, tone: printRiskTone },
+        { label: "오버행", value: print.overhangRatio, icon: Printer, tone: printRatioTone },
+        { label: "흔들림", value: print.wobbleRatio, icon: Target, tone: printRatioTone },
+      ]
+    : [
+        { label: "최대", value: analysis.maxStressMPa / Math.max(analysis.allowableMPa, 0.001), icon: Zap, tone: utilizationTone },
+        { label: "평균", value: analysis.avgStressMPa / Math.max(analysis.allowableMPa, 0.001), icon: Activity, tone: utilizationTone },
+        { label: "주의 면적", value: analysis.warningRatio, icon: Target, tone: utilizationTone },
   ];
 
   return (
@@ -719,7 +797,7 @@ function StressSummary({ analysis }) {
             </div>
             <span className="stress-track">
               <i
-                className={utilizationTone(item.value)}
+                className={item.tone(item.value)}
                 style={{ width: `${clamp(item.value, 0.03, 1.25) * 80}%` }}
               />
             </span>
@@ -731,14 +809,14 @@ function StressSummary({ analysis }) {
   );
 }
 
-function MetricRing({ value }) {
+function MetricRing({ value, label = "최대 사용률", tone = utilizationTone(value) }) {
   const percent = clamp(value, 0, 1.25);
   const radius = 54;
   const circumference = 2 * Math.PI * radius;
   const dash = circumference * clamp(percent, 0, 1);
 
   return (
-    <div className={`metric-ring ${utilizationTone(value)}`}>
+    <div className={`metric-ring ${tone}`}>
       <svg viewBox="0 0 132 132">
         <circle cx="66" cy="66" r={radius} fill="none" stroke="#e3eaee" strokeWidth="12" />
         <circle
@@ -755,9 +833,48 @@ function MetricRing({ value }) {
       </svg>
       <div>
         <strong>{formatPercent(value)}</strong>
-        <span>최대 사용률</span>
+        <span>{label}</span>
       </div>
     </div>
+  );
+}
+
+function PrintMetrics({ analysis, settings }) {
+  const print = analysis.printStability;
+  return (
+    <>
+      <div className="metric-grid">
+        <Metric label="최대 리스크" value={formatPercent(print.maxRisk)} tone={printRiskTone(print.maxRisk)} />
+        <Metric label="오버행 후보" value={formatPercent(print.overhangRatio)} tone={printRatioTone(print.overhangRatio)} />
+        <Metric label="브릿지 후보" value={formatPercent(print.bridgeRatio)} tone={printRatioTone(print.bridgeRatio)} />
+        <Metric label="흔들림 후보" value={formatPercent(print.wobbleRatio)} tone={printRatioTone(print.wobbleRatio)} />
+        <Metric
+          label="베드 접촉"
+          value={formatPercent(print.bedContactRatio)}
+          tone={print.bedContactRatio < 0.08 ? "warn" : ""}
+        />
+        <Metric
+          label="형상 세장비"
+          value={`${formatNumber(print.slenderness, 1)} x`}
+          tone={print.slenderness > 5 ? "warn" : ""}
+        />
+        <Metric label="출력 방향" value={`${print.buildAxis.toUpperCase()}축`} />
+        <Metric label="서포트 기준" value={`${settings.overhangAngle}도`} />
+      </div>
+
+      <div className="hotspot-list">
+        <h2>출력 불안정 지점</h2>
+        {print.hotspots.map((hotspot, index) => (
+          <div className="hotspot-row" key={`${hotspot.reason}-${index}`}>
+            <span className={`hotspot-dot ${index === 0 ? "critical" : ""}`}>{index + 1}</span>
+            <div>
+              <strong>{hotspot.reason}</strong>
+              <small>리스크 {formatPercent(hotspot.risk)} · 적층 {print.buildAxis.toUpperCase()}축 기준</small>
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
   );
 }
 
@@ -961,6 +1078,12 @@ function meshQualityTone(meshQuality) {
   return "danger";
 }
 
+function printRatioTone(value) {
+  if (value >= 0.18) return "danger";
+  if (value >= 0.08) return "warn";
+  return "safe";
+}
+
 function ProMetric({ label, value, tone = "" }) {
   return (
     <div className={`pro-metric ${tone}`}>
@@ -1045,6 +1168,60 @@ function buildRecommendations(analysis, settings) {
   }
 
   return items.slice(0, 4);
+}
+
+function buildPrintRecommendations(analysis, settings) {
+  const print = analysis.printStability;
+  const items = [];
+
+  if (print.maxRisk >= 0.78) {
+    items.push({ icon: AlertTriangle, text: "빨간 면은 서포트를 켜거나 모델 출력 방향을 바꾸세요." });
+  } else if (print.maxRisk >= 0.46) {
+    items.push({ icon: Printer, text: "노란 면은 슬라이서에서 서포트 생성 후보로 확인하세요." });
+  } else {
+    items.push({ icon: ShieldCheck, text: "현재 적층 방향에서는 큰 출력 불안정 구간이 적습니다." });
+  }
+
+  if (print.overhangRatio >= 0.08) {
+    items.push({ icon: Layers3, text: `${settings.overhangAngle}도 기준 오버행이 많습니다. 챔퍼나 지지 리브를 추가하세요.` });
+  }
+
+  if (print.bridgeRatio >= 0.05) {
+    items.push({ icon: Ruler, text: "긴 브릿지는 분할 출력하거나 임시 서포트 기둥을 넣는 편이 안전합니다." });
+  }
+
+  if (print.wobbleRatio >= 0.06 || print.slenderness > 5) {
+    items.push({ icon: Target, text: "높고 얇은 부분은 brim/raft, 출력 속도 감소, 벽 두께 증가가 필요합니다." });
+  }
+
+  if (print.bedContactRatio < 0.08) {
+    items.push({ icon: Crosshair, text: "베드 접촉이 작습니다. 바닥 면을 넓히거나 brim/raft를 적용하세요." });
+  }
+
+  return items.slice(0, 4);
+}
+
+function summarizePrintStability(print) {
+  return {
+    maxRisk: print.maxRisk,
+    avgRisk: print.avgRisk,
+    overhangRatio: print.overhangRatio,
+    bridgeRatio: print.bridgeRatio,
+    wobbleRatio: print.wobbleRatio,
+    curlRatio: print.curlRatio,
+    bedContactRatio: print.bedContactRatio,
+    bedContactAreaMeters2: print.bedContactAreaMeters2,
+    footprintMeters2: print.footprintMeters2,
+    slenderness: print.slenderness,
+    buildAxis: print.buildAxis,
+    overhangAngle: print.overhangAngle,
+    label: print.label,
+    hotspots: print.hotspots.map((hotspot) => ({
+      risk: hotspot.risk,
+      reason: hotspot.reason,
+      position: hotspot.position.toArray(),
+    })),
+  };
 }
 
 export default App;

@@ -92,6 +92,18 @@ export function utilizationTone(value) {
   return "safe";
 }
 
+export function printRiskLabel(value) {
+  if (value >= 0.78) return "서포트 필요";
+  if (value >= 0.46) return "출력 주의";
+  return "출력 안정";
+}
+
+export function printRiskTone(value) {
+  if (value >= 0.78) return "danger";
+  if (value >= 0.46) return "warn";
+  return "safe";
+}
+
 export function heatColor(utilization) {
   const green = new THREE.Color("#159a62");
   const yellow = new THREE.Color("#e0a51f");
@@ -104,6 +116,24 @@ export function heatColor(utilization) {
     return yellow.lerp(red, clamp((utilization - 0.68) / 0.4, 0, 1));
   }
   return red.lerp(magenta, clamp((utilization - 1.08) / 0.6, 0, 1));
+}
+
+export function printRiskColor(risk) {
+  const blue = new THREE.Color("#1d7f9f");
+  const green = new THREE.Color("#159a62");
+  const amber = new THREE.Color("#e0a51f");
+  const orange = new THREE.Color("#d66d22");
+  const red = new THREE.Color("#d64b3f");
+  if (risk <= 0.28) {
+    return blue.lerp(green, clamp(risk / 0.28, 0, 1));
+  }
+  if (risk <= 0.58) {
+    return green.lerp(amber, clamp((risk - 0.28) / 0.3, 0, 1));
+  }
+  if (risk <= 0.82) {
+    return amber.lerp(orange, clamp((risk - 0.58) / 0.24, 0, 1));
+  }
+  return orange.lerp(red, clamp((risk - 0.82) / 0.18, 0, 1));
 }
 
 export function createDemoGeometry() {
@@ -240,6 +270,7 @@ export function analyzeGeometry(sourceGeometry, settings) {
   const forceN = settings.loadKg * 9.80665;
   const triangleCount = position.count / 3;
   const meshQuality = estimateMeshQuality(position, unitScale, bbox);
+  const printStability = analyzePrintStability(position, normal, bbox, settings, unitScale);
   const volumeMeters3 = estimateVolumeMeters3(position, unitScale);
   const fallbackVolume = Math.max(sizeMeters.x * sizeMeters.y * sizeMeters.z * 0.16, 1e-9);
   const modelVolume = Math.max(volumeMeters3, fallbackVolume);
@@ -296,7 +327,8 @@ export function analyzeGeometry(sourceGeometry, settings) {
       shearFactor *
       printPenalty;
     const utilization = stressMPa / Math.max(allowableMPa, 0.001);
-    const color = heatColor(utilization);
+    const printRisk = printStability.vertexRisks[index] || 0;
+    const color = settings.viewMode === "print" ? printRiskColor(printRisk) : heatColor(utilization);
     colors[index * 3] = color.r;
     colors[index * 3 + 1] = color.g;
     colors[index * 3 + 2] = color.b;
@@ -338,12 +370,184 @@ export function analyzeGeometry(sourceGeometry, settings) {
     triangleCount,
     vertexCount: position.count,
     meshQuality,
+    printStability,
+    viewMode: settings.viewMode || "stress",
     hotspots,
     loadPoint,
     loadDirection,
     support,
     material,
   };
+}
+
+function analyzePrintStability(position, normal, bbox, settings, unitScale) {
+  const buildAxis = settings.layerAxis || "z";
+  const buildVector = layerDirection(buildAxis);
+  const downVector = buildVector.clone().multiplyScalar(-1);
+  const buildSupport = { axis: buildAxis, side: "min" };
+  const rawSize = bbox.getSize(new THREE.Vector3());
+  const heightRaw = Math.max(rawSize[buildAxis], 1e-6);
+  const heightMeters = Math.max(heightRaw * unitScale, 0.001);
+  const crossAxes = AXES.filter((axis) => axis !== buildAxis);
+  const footprintMeters2 = Math.max(rawSize[crossAxes[0]] * rawSize[crossAxes[1]] * unitScale * unitScale, 1e-8);
+  const binAreas = buildSectionBins(position, buildSupport, bbox, unitScale);
+  const medianBinArea = median(binAreas.filter((area) => area > 0));
+  const bedThreshold = Math.max(heightRaw * 0.018, 0.45 / Math.max(unitScale * 1000, 1e-6));
+  const overhangCos = Math.cos(THREE.MathUtils.degToRad(settings.overhangAngle ?? 45));
+  const vertexRisks = new Float32Array(position.count);
+  const vertexStats = [];
+  let riskSum = 0;
+  let maxRisk = 0;
+  let overhangVertices = 0;
+  let bridgeVertices = 0;
+  let wobbleVertices = 0;
+  let curlVertices = 0;
+
+  const bed = estimateBedContact(position, bbox, buildAxis, downVector, unitScale, bedThreshold);
+  const slenderness = heightMeters / Math.sqrt(footprintMeters2);
+  const bedContactRatio = clamp(bed.areaMeters2 / footprintMeters2, 0, 1);
+  const bedAdhesionRisk = clamp((0.12 - bedContactRatio) / 0.12, 0, 1);
+  const warpFactor = materialWarpFactor(settings.material);
+
+  for (let index = 0; index < position.count; index += 1) {
+    const point = readPoint(position, index);
+    const normalized = normalizePoint(point, bbox);
+    const normalVector = readPoint(normal, index).normalize();
+    const heightNorm = clamp((point[buildAxis] - bbox.min[buildAxis]) / heightRaw, 0, 1);
+    const downFacing = clamp(normalVector.dot(downVector), 0, 1);
+    const overhangRisk =
+      smoothstep(overhangCos - 0.16, 1, downFacing) *
+      smoothstep(0.018, 0.1, heightNorm);
+    const sectionFactor = sectionStressFactor(point, bbox, buildSupport, binAreas, medianBinArea);
+    const thinRisk = clamp((sectionFactor - 1.0) / 1.35, 0, 1);
+    const wobbleRisk =
+      smoothstep(0.4, 1, heightNorm) *
+      clamp((slenderness - 2.2) / 6.5, 0, 1) *
+      clamp(0.25 + thinRisk, 0, 1);
+    const bridgeRisk =
+      overhangRisk *
+      smoothstep(0.18, 0.85, heightNorm) *
+      clamp(1.1 - sectionFactor / 2.4, 0.15, 1);
+    const nearBed = 1 - smoothstep(0.02, 0.16, heightNorm);
+    const edgeDistance = Math.min(
+      normalized[crossAxes[0]],
+      1 - normalized[crossAxes[0]],
+      normalized[crossAxes[1]],
+      1 - normalized[crossAxes[1]],
+    );
+    const cornerCurlRisk =
+      warpFactor *
+      bedAdhesionRisk *
+      nearBed *
+      smoothstep(0.22, 0, edgeDistance);
+    const risk = clamp(
+      overhangRisk * 0.68 +
+        bridgeRisk * 0.22 +
+        wobbleRisk * 0.46 +
+        cornerCurlRisk * 0.38,
+      0,
+      1,
+    );
+
+    vertexRisks[index] = risk;
+    riskSum += risk;
+    maxRisk = Math.max(maxRisk, risk);
+    if (overhangRisk >= 0.46) overhangVertices += 1;
+    if (bridgeRisk >= 0.42) bridgeVertices += 1;
+    if (wobbleRisk >= 0.36) wobbleVertices += 1;
+    if (cornerCurlRisk >= 0.3) curlVertices += 1;
+    vertexStats.push({
+      point,
+      risk,
+      overhangRisk,
+      bridgeRisk,
+      wobbleRisk,
+      cornerCurlRisk,
+      heightNorm,
+      sectionFactor,
+    });
+  }
+
+  const hotspots = buildPrintHotspots(vertexStats, Math.max(rawSize.x, rawSize.y, rawSize.z));
+  const vertexCount = Math.max(position.count, 1);
+
+  return {
+    vertexRisks,
+    maxRisk,
+    avgRisk: riskSum / vertexCount,
+    overhangRatio: overhangVertices / vertexCount,
+    bridgeRatio: bridgeVertices / vertexCount,
+    wobbleRatio: wobbleVertices / vertexCount,
+    curlRatio: curlVertices / vertexCount,
+    bedContactAreaMeters2: bed.areaMeters2,
+    footprintMeters2,
+    bedContactRatio,
+    slenderness,
+    buildAxis,
+    overhangAngle: settings.overhangAngle ?? 45,
+    label: printRiskLabel(maxRisk),
+    hotspots,
+  };
+}
+
+function estimateBedContact(position, bbox, buildAxis, downVector, unitScale, bedThreshold) {
+  let areaMeters2 = 0;
+  for (let i = 0; i < position.count; i += 3) {
+    const a = readPoint(position, i);
+    const b = readPoint(position, i + 1);
+    const c = readPoint(position, i + 2);
+    const center = (a[buildAxis] + b[buildAxis] + c[buildAxis]) / 3;
+    if (center - bbox.min[buildAxis] > bedThreshold) continue;
+    const faceNormal = new THREE.Vector3()
+      .subVectors(b, a)
+      .cross(new THREE.Vector3().subVectors(c, a))
+      .normalize();
+    if (Math.abs(faceNormal.dot(downVector)) < 0.45) continue;
+    areaMeters2 += triangleArea(a, b, c) * unitScale * unitScale;
+  }
+  return { areaMeters2 };
+}
+
+function materialWarpFactor(materialKey) {
+  if (materialKey === "abs") return 1.0;
+  if (materialKey === "nylon") return 0.82;
+  if (materialKey === "petg") return 0.42;
+  return 0.28;
+}
+
+function buildPrintHotspots(vertexStats, maxRawSize) {
+  const sorted = [...vertexStats]
+    .filter((item) => Number.isFinite(item.risk))
+    .sort((a, b) => b.risk - a.risk);
+  const hotspots = [];
+  const minDistance = Math.max(maxRawSize * 0.1, 1e-5);
+
+  for (const item of sorted) {
+    if (hotspots.length >= 5) break;
+    const tooClose = hotspots.some((hotspot) => hotspot.position.distanceTo(item.point) < minDistance);
+    if (tooClose) continue;
+    hotspots.push({
+      position: item.point.clone(),
+      risk: item.risk,
+      reason: printRiskReason(item),
+    });
+  }
+
+  return hotspots;
+}
+
+function printRiskReason(item) {
+  if (item.overhangRisk >= 0.62) return "서포트가 필요한 오버행";
+  if (item.bridgeRisk >= 0.48) return "브릿지/공중 출력 후보";
+  if (item.wobbleRisk >= 0.38) return "높고 얇아 흔들림 위험";
+  if (item.cornerCurlRisk >= 0.3) return "베드 모서리 들뜸 위험";
+  return "출력 안정성 주의 구간";
+}
+
+function smoothstep(edge0, edge1, value) {
+  if (edge0 === edge1) return value >= edge1 ? 1 : 0;
+  const t = clamp((value - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
 function readPoint(attribute, index) {

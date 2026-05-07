@@ -23,11 +23,15 @@ function clearGroup(group) {
 }
 
 function makeSupportPlane(analysis) {
-  const { bbox, support } = analysis;
+  const { bbox } = analysis;
+  const support =
+    analysis.viewMode === "print"
+      ? { axis: analysis.printStability?.buildAxis ?? "z", side: "min" }
+      : analysis.support;
   const size = bbox.getSize(new THREE.Vector3());
   const center = bbox.getCenter(new THREE.Vector3());
   const material = new THREE.MeshBasicMaterial({
-    color: "#159a62",
+    color: analysis.viewMode === "print" ? "#1d7f9f" : "#159a62",
     transparent: true,
     opacity: 0.18,
     side: THREE.DoubleSide,
@@ -66,15 +70,28 @@ function makeLoadArrow(analysis) {
   return new THREE.ArrowHelper(direction, origin, length, "#d66d22", length * 0.28, length * 0.14);
 }
 
+function makeBuildArrow(analysis) {
+  const size = analysis.bbox.getSize(new THREE.Vector3());
+  const center = analysis.bbox.getCenter(new THREE.Vector3());
+  const maxSize = Math.max(size.x, size.y, size.z, 0.001);
+  const length = maxSize * 0.26;
+  const axis = analysis.printStability?.buildAxis ?? "z";
+  const direction = axisVector(axis);
+  const origin = center.clone();
+  origin[axis] = analysis.bbox.min[axis] - length * 0.82;
+  return new THREE.ArrowHelper(direction, origin, length, "#23607a", length * 0.25, length * 0.13);
+}
+
 function makeHotspotMarkers(analysis) {
   const group = new THREE.Group();
   const size = analysis.bbox.getSize(new THREE.Vector3());
   const maxSize = Math.max(size.x, size.y, size.z);
   const radius = Math.max(maxSize * 0.023, 0.01);
-  analysis.hotspots.forEach((hotspot, index) => {
-    const color = index === 0 ? "#d64b3f" : "#e0a51f";
+  const hotspots = analysis.viewMode === "print" ? analysis.printStability?.hotspots ?? [] : analysis.hotspots;
+  hotspots.forEach((hotspot, index) => {
+    const color = index === 0 ? "#d64b3f" : analysis.viewMode === "print" ? "#d66d22" : "#e0a51f";
     const material = new THREE.MeshBasicMaterial({
-      color: index === 0 ? "#d64b3f" : "#e0a51f",
+      color,
       transparent: true,
       opacity: 0.95,
       depthTest: false,
@@ -109,6 +126,12 @@ function makeHotspotMarkers(analysis) {
     group.add(marker);
   });
   return group;
+}
+
+function axisVector(axis) {
+  if (axis === "x") return new THREE.Vector3(1, 0, 0);
+  if (axis === "y") return new THREE.Vector3(0, 1, 0);
+  return new THREE.Vector3(0, 0, 1);
 }
 
 function fitCamera(camera, controls, bbox, viewportRatio) {
@@ -229,12 +252,22 @@ export default function ThreeStressViewer({ analysis }) {
     }
 
     group.add(makeSupportPlane(analysis));
-    group.add(makeLoadArrow(analysis));
+    if (analysis.viewMode === "print") {
+      group.add(makeBuildArrow(analysis));
+    } else {
+      group.add(makeLoadArrow(analysis));
+    }
     group.add(makeHotspotMarkers(analysis));
 
     const rect = renderer.domElement.getBoundingClientRect();
     fitCamera(camera, controls, analysis.bbox, Math.max(rect.width, 1) / Math.max(rect.height, 1));
   }, [analysis]);
 
-  return <div className="viewer-canvas" ref={mountRef} aria-label="3D 응력 히트맵 뷰어" />;
+  return (
+    <div
+      className="viewer-canvas"
+      ref={mountRef}
+      aria-label={analysis?.viewMode === "print" ? "3D 프린팅 출력 안정성 히트맵 뷰어" : "3D 응력 히트맵 뷰어"}
+    />
+  );
 }
