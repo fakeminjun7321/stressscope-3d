@@ -19,6 +19,16 @@ This repo is configured for GitHub Pages at:
 https://fakeminjun7321.github.io/stressscope-3d/
 ```
 
+## Stress Test Model
+
+Download this complex OBJ test file and upload it in the app:
+
+```text
+https://fakeminjun7321.github.io/stressscope-3d/test-assets/stressscope-mega-architecture.obj
+```
+
+It contains a multi-tower architectural structure with skybridges, trusses, arches, cantilevers, columns, and stairs.
+
 ## Local Development
 
 ```bash
@@ -30,6 +40,12 @@ npm run dev
 
 ```bash
 npm run build
+```
+
+Regenerate the stress test model:
+
+```bash
+npm run generate:test-model
 ```
 
 ## Optional Cloud Solver API

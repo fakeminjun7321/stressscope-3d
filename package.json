@@ -7,6 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "cloud:mock": "node server/cloud-solver.mjs",
+    "generate:test-model": "node scripts/generate-mega-test-model.mjs",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {

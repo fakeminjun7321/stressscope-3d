@@ -441,9 +441,11 @@ function estimateMeshQuality(position, unitScale, bbox) {
   const watertightRatio = manifoldEdges / edgeCount;
   const score = clamp(1 - problemEdgeRatio * 1.6 - degenerateRatio * 3.2, 0, 1);
 
+  const label = meshQualityLabel(score, openEdges, nonManifoldEdges);
+
   return {
     score,
-    label: meshQualityLabel(score, openEdges, nonManifoldEdges),
+    label,
     surfaceAreaMeters2,
     watertightRatio,
     openEdges,
@@ -452,7 +454,7 @@ function estimateMeshQuality(position, unitScale, bbox) {
     degenerateRatio,
     edgeCount: edges.size,
     warning:
-      score >= 0.9
+      label === "체적 메시 적합"
         ? "체적 메시 생성에 적합한 표면 메시로 보입니다."
         : "열린 경계나 비정상 edge가 있어 FEA 전 메시 수리가 필요할 수 있습니다.",
   };
